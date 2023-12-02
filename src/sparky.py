@@ -3,8 +3,8 @@
 import pandas, os
 import logging
 from pyspark.sql import SparkSession, Row
-from pyspark.sql.types import NumericType, StringType, ArrayType
-from pyspark.sql.functions import col, lower, regexp_replace, split, from_json
+from pyspark.sql.types import NumericType, StringType, ArrayType, IntegerType
+from pyspark.sql.functions import col, lower, regexp_replace, split, from_json, expr
 from pyspark import SparkConf, SparkContext
 
 spark = SparkSession.builder.getOrCreate()
@@ -47,8 +47,8 @@ nonNumCol = [
     and column != "VehFeats"
 ]
 
-#
-with open("colInfo.log", "w") as f:
+# Generate condensed data structure log file for nonnumeric col
+with open("nonNumCol.log", "w") as f:
     # Redirect stdout to the file just to extract the structure before preprocessing
     os.sys.stdout = f
     uniqEntryCounts = []
@@ -60,20 +60,25 @@ with open("colInfo.log", "w") as f:
         nullEntryCounts.append(nullEntryCount)
         uniqEntry = trainRaw.select(column).distinct().collect()
         print(
-            f"Unique entries for column '{column}' ({uniqEntryCount} with {nullEntryCount} null):"
+            f"Unique entries for column '{column}' ({uniqEntryCount} with {nullEntryCount} null entries):"
         )
         for entry in uniqEntry:
             print(entry[0])
-        print("===" * 20)
-    print("Col/Uniques/Nulls(***):")
-    zipped = list(zip(trainRaw.columns, uniqEntryCounts, nullEntryCounts))
-    for row in [list(row) for row in zipped]:
-        if row[-1] > 0:
-            print(row + '***')
+        print("====" * 20)
+    print("NonNumCol/Uniques/Nulls(***):")
+    zipped = list(zip(nonNumCol, uniqEntryCounts, nullEntryCounts))
+    for z in zipped:
+        if z[-1] > 0:
+            print(f"{z}***")
         else:
-            print(row)
-        print(row[-1])
+            print(z)
 os.sys.stdout = os.sys.__stdout__
+
+# We can see from the log file generated that VehBodystyle only has SUV and
+# VehType only has Used. Neither have nulls in the column --> drop redundancy
+colRedundancy = ["VehBodystyle", "VehType"]
+trainRaw = trainRaw.drop(*colRedundancy)
+testRaw = testRaw.drop(*colRedundancy)
 
 # Simplify short and simple descriptors by lowercase and remove special chars
 # Save other more complex string types for later to not jump the gun on transformations for other string types
@@ -112,10 +117,36 @@ testRaw, trainRaw = [
     )
     .withColumn("VehEngine", split(col("VehEngine"), " ").cast(ArrayType(StringType())))
     .withColumn(
-        "VehHistory", split(col("VehHistory"), " ").cast(ArrayType(StringType()))
+        "VehHistory", split(col("VehHistory"), ",").cast(ArrayType(StringType()))
     )
     .withColumn("VehFeats", from_json(col("VehFeats"), ArrayType(StringType())))
     for df in [testRaw, trainRaw]
 ]
-trainRaw.show(4)
-testRaw.show(4)
+
+# We note that VehHistory [# Owner, ...] that can be featurized as NumOwners
+# separate from the rest of the data. Later found explicit casting for simple
+# type here was not needed
+
+trainRaw, testRaw = [
+    df.withColumn("NumOwners", split(col("VehHistory")[0], " ")[0]).withColumn(
+        "NumOwners", col("NumOwners").cast(IntegerType())
+    )
+    for df in [testRaw, trainRaw]
+]
+
+# Now remove owner entry from original col entries. Note VehHistory has
+# at most 5 elements per entry (see log file), go up to 6 to be safe?
+trainRaw, testRaw = [
+    df.withColumn("VehHistory", expr("slice(VehHistory, 2, 6)"))
+    for df in [testRaw, trainRaw]
+]
+
+# More testing can be done to see impacts of splitting up vectorized features
+# or see sentiment attached with certain elements in the entries
+
+trainRaw.printSchema()
+
+# Print the number of columns (note additional 2 on train for y)
+print(f"The Train DataFrame is {trainRaw.count()} by {len(trainRaw.columns)}.")
+print(f"The Test DataFrame is  {testRaw.count()} by {len(testRaw.columns)}.")
+
