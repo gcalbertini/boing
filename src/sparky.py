@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-import pandas, os
-import logging
-from pyspark.sql import SparkSession, Row
+import os
+from pyspark.sql import SparkSession
 from pyspark.sql.types import NumericType, StringType, ArrayType, IntegerType
-from pyspark.sql.functions import col, lower, regexp_replace, split, from_json, expr
-from pyspark import SparkConf, SparkContext
+from pyspark.sql.functions import col, lower, regexp_replace, split, expr, length, when
+from pyspark.ml.feature import RegexTokenizer, Word2Vec, StopWordsRemover
 
+# no truly massive arrays, iterative procedures, simple SQL ops --> Spark on local should be ok
 spark = SparkSession.builder.getOrCreate()
 # Skipping part where can set further config options and send job to YARN scheduler, but very possible to tune
 
@@ -37,6 +37,9 @@ trainRaw.printSchema()
 # Print the number of columns (note additional 2 on train for y)
 print(f"The Train DataFrame is {trainRaw.count()} by {len(trainRaw.columns)}.")
 print(f"The Test DataFrame is  {testRaw.count()} by {len(testRaw.columns)}.")
+
+trainRaw.show(2)
+testRaw.show(2)
 
 
 def process_non_numeric_columns(df, output_file):
@@ -154,8 +157,23 @@ testRaw, trainRaw = [
         "VehColorInt",
         lower(regexp_replace(col("VehColorInt"), "[^a-zA-Z0-9]", "")),
     )
+    .withColumn(
+        "VehFeats",
+        lower(
+            regexp_replace(col("VehFeats"), "[^a-zA-Z0-9/ ]", "")
+        ),  # keep '/ ' for AM/FM etc and space separation
+    )
+    .withColumn(
+        "VehDriveTrain",
+        lower(
+            regexp_replace(col("VehDriveTrain"), "[^a-zA-Z0-9/]", "")
+        ),  # keep '/' for 4x4/AWD etc
+    )
     for df in [testRaw, trainRaw]
 ]
+
+feats = trainRaw.select("VehFeats").limit(3)
+feats.show()
 
 # Vectorize array 'string' types that may contain richer info and cast for new schema
 testRaw, trainRaw = [
@@ -166,7 +184,6 @@ testRaw, trainRaw = [
     .withColumn(
         "VehHistory", split(col("VehHistory"), ",").cast(ArrayType(StringType()))
     )
-    .withColumn("VehFeats", from_json(col("VehFeats"), ArrayType(StringType())))
     for df in [testRaw, trainRaw]
 ]
 
@@ -174,7 +191,7 @@ testRaw, trainRaw = [
 # separate from the rest of the data. Later found explicit casting for simple
 # type here was not needed
 
-trainRaw, testRaw = [
+testRaw, trainRaw = [
     df.withColumn("NumOwners", split(col("VehHistory")[0], " ")[0]).withColumn(
         "NumOwners", col("NumOwners").cast(IntegerType())
     )
@@ -183,7 +200,7 @@ trainRaw, testRaw = [
 
 # Now remove owner entry from original col entries. Note VehHistory has
 # at most 5 elements per entry (see log file), go up to 6 to be safe?
-trainRaw, testRaw = [
+testRaw, trainRaw = [
     df.withColumn("VehHistory", expr("slice(VehHistory, 2, 6)"))
     for df in [testRaw, trainRaw]
 ]
@@ -195,11 +212,111 @@ print(f"New column for owners contains {nullEntryCount}/201 null entries in trai
 # More testing can be done to see impacts of splitting up vectorized features
 # or see sentiment attached with certain elements in the entries
 
+# There are only so many VehDriveTrain options. Replace drive with 'D', all with 'A' etc
+
+testRaw, trainRaw = [
+    df.withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "front", "F"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "wheel", "W"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "drive", "D"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "all", "A"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "four", "4"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "two", "2"))
+    .withColumn("VehDriveTrain", regexp_replace(col("VehDriveTrain"), "or", "/"))
+    for df in [testRaw, trainRaw]
+]
+
+# We note from logs that 'ALL-WHEEL DRIVE WITH LOCKING AND LIMITED-SLIP DIFFERENTIAL' would read as AWDwithlockingandlimitedslipdifferential as such:
+funky = (
+    trainRaw.select("VehDriveTrain", "ListingID")
+    .filter(length(col("VehDriveTrain")) > 7)
+    .limit(3)
+)
+funky.show()
+
+trainRaw = trainRaw.withColumn(
+    "VehDriveTrain",
+    when(col("ListingID") == 425217, "AWD").otherwise(col("VehDriveTrain")),
+)
+trainRaw.show(2)
+
+
 trainRaw.printSchema()
 
 # Print the number of columns (note additional 2 on train for y)
 print(f"The Train DataFrame is {trainRaw.count()} by {len(trainRaw.columns)}.")
 print(f"The Test DataFrame is  {testRaw.count()} by {len(testRaw.columns)}.")
+
+# We now want to tokenize the VehSellerNotes entries
+# https://spark.apache.org/docs/latest/ml-features.html
+# https://databricks-prod-cloudfront.cloud.databricks.com/public/4027ec902e239c93eaaa8714f173bcfc/2281281647728580/33322862051354/347222873603598/latest.html
+# https://spark.apache.org/docs/latest/ml-linalg-guide.html << should be installed for faster numerical processing
+
+# First nulls should be filled with `None.` as it's likley there is intentionality to notes being left blank and feature has significant heterogeneity even when tokenized
+trainRaw = trainRaw.na.fill("None.", subset=["VehSellerNotes"])
+testRaw = testRaw.na.fill("None.", subset=["VehSellerNotes"])
+
+
+def process_text_column(df, input_col, vector_size=20, min_count=3):
+    # Tokenize the input column
+    regexTokenizer = RegexTokenizer(
+        gaps=False, pattern="\w+", inputCol=input_col, outputCol=f"Token1_{input_col}"
+    )
+    df = regexTokenizer.transform(df)
+
+    # Remove stop words
+    swr = StopWordsRemover(
+        inputCol=f"Token1_{input_col}", outputCol=f"Token2_{input_col}"
+    )
+    df = swr.transform(df)
+
+    # Apply Word2Vec; since there are view
+    word2vec = Word2Vec(
+        vectorSize=vector_size,
+        minCount=min_count,
+        inputCol=f"Token2_{input_col}",
+        outputCol=f"Token_{input_col}",
+    )
+    model = word2vec.fit(df)
+    df = model.transform(df)
+
+    # Drop intermmediaries and original raw form
+    col2Drop = [input_col, f"Token1_{input_col}", f"Token2_{input_col}"]
+    for c in col2Drop:
+        df = df.drop(c)
+
+    return df
+
+
+# Assume that words must show up at least 10 times in corpus (notes column) to be considered for training and reduce some noise;
+# avoid overfitting on this small dataset and keep vec size near 100 --> use another project to fine tune all of this
+trainRaw = process_text_column(
+    trainRaw, "VehSellerNotes", vector_size=100, min_count=10
+)
+testRaw = process_text_column(testRaw, "VehSellerNotes", vector_size=100, min_count=2)
+
+# We would like to do the same for VehFeatures but see missing values that can't just be 'None.' as some may have features. The issue is
+# that even if cars share same make, model, and trim there may be orderable options that are added, region-specific features, or yearly mfg changes
+# that intro variability. Even if minimal, impact of one or two features may make a difference -- we just don't know.
+# Decision here is to drop relatively negl rows for which this is the case (see logs)
+trainRaw = trainRaw.na.drop(subset=["VehFeats"])
+testRaw = testRaw.na.drop(subset=["VehFeats"])
+
+# can fine tune in other endeavors; note instead of vectorizing can explode as separate features but may lead to sparsity or much more
+# work to condense features, i.e. can have 'adjustable wheel' vs 'adjustable steering wheel' vs 'wheels adjust' vs 'adjustable wheels' for intended binary feature ADJ_WHEEL
+trainRaw = process_text_column(trainRaw, "VehFeats", vector_size=50, min_count=5)
+testRaw = process_text_column(testRaw, "VehFeats", vector_size=50, min_count=2)
+
+# Since seller name does not have any nulls and 700+ types lets do a last min tokenization (see logs)
+# making sure all names are considered for training. Alt could use something like a dummy variable but introduces
+# a lot of sparsity in the design matrix
+trainRaw = process_text_column(trainRaw, "SellerName", vector_size=10, min_count=1)
+testRaw = process_text_column(testRaw, "SellerName", vector_size=10, min_count=1)
+
+trainRaw.show(3)
+
+# ListingID is not quite an index and can spill into nonsensical feature contributions; can be indexed in jupyter nb
+trainRaw = trainRaw.drop("ListingID")
+testRaw = testRaw.drop("ListingID")
 
 # On the question of missing data. We have to study MAR, MCAR, or MNAR.
 # https://bookdown.org/rwnahhas/RMPH/mi-mechanisms.html
@@ -233,6 +350,14 @@ colDropTest = ["VehColorExt", "VehMileage"]
 train = trainRaw.na.drop(subset=[*colDropTrain])
 test = testRaw.na.drop(subset=[*colDropTest])
 
+
 # Print the number of columns (note additional 2 on train for y)
 print(f"The outgoing Train DataFrame is {train.count()} by {len(train.columns)}.")
 print(f"The outgoing Test DataFrame is  {test.count()} by {len(test.columns)}.")
+
+# Save the Pandas DataFrame to a CSV file
+train.toPandas().to_csv(folderPath + "/train_sparked.csv", index=False)
+test.toPandas().to_csv(folderPath + "/test_sparked.csv", index=False)
+
+
+spark.stop()
