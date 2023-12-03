@@ -260,49 +260,54 @@ trainRaw = trainRaw.na.fill("None.", subset=["VehSellerNotes"])
 testRaw = testRaw.na.fill("None.", subset=["VehSellerNotes"])
 
 
-def process_text_column(df, input_col, vector_size=20, min_count=3):
-    # Tokenize the input column
+def process_text_column(input_col, trainX, testX, vector_size=20, min_count=3):
+
+    # Tokenize the input column of both sets of data
     regexTokenizer = RegexTokenizer(
         gaps=False, pattern="\w+", inputCol=input_col, outputCol=f"Token1_{input_col}"
     )
-    df = regexTokenizer.transform(df)
+    trainX = regexTokenizer.transform(trainX)
+    testX = regexTokenizer.transform(testX)
 
-    # Remove stop words
+    # Remove stop words from both sets of data
     swr = StopWordsRemover(
         inputCol=f"Token1_{input_col}", outputCol=f"Token2_{input_col}"
     )
-    df = swr.transform(df)
+    trainX = swr.transform(trainX)
+    testX = swr.transform(testX)
 
-    # Apply Word2Vec; since there are view
+    # Apply Word2Vec model; recall to fit on only on training data and apply transform to both sets to avoid leakage
     word2vec = Word2Vec(
         vectorSize=vector_size,
         minCount=min_count,
         inputCol=f"Token2_{input_col}",
         outputCol=f"Token_{input_col}",
     )
-    model = word2vec.fit(df)
-    df = model.transform(df)
+    model = word2vec.fit(trainX)
+    trainX = model.transform(trainX)
+    testX = model.transform(testX)
 
     # Drop intermmediaries and original raw form
     col2Drop = [input_col, f"Token1_{input_col}", f"Token2_{input_col}"]
     for c in col2Drop:
-        df = df.drop(c)
+        trainX = trainX.drop(c)
+        testX = testX.drop(c)
 
-    return df
+    return trainX, testX
 
 
 # Assume that words must show up at least 10 times in corpus (notes column) to be considered for training and reduce some noise;
 # avoid overfitting on this small dataset and keep vec size near 100 --> use another project to fine tune all of this
-trainRaw = process_text_column(
-    trainRaw, "VehSellerNotes", vector_size=100, min_count=10
+trainRaw, testRaw = process_text_column(
+    "VehSellerNotes", trainRaw, testRaw, vector_size=100, min_count=10
 )
-testRaw = process_text_column(testRaw, "VehSellerNotes", vector_size=100, min_count=2)
 
 # Since seller name does not have any nulls and 700+ types lets do a last min tokenization (see logs)
 # making sure all names are considered for training. Alt could use something like a dummy variable but introduces
 # a lot of sparsity in the design matrix
-trainRaw = process_text_column(trainRaw, "SellerName", vector_size=10, min_count=1)
-testRaw = process_text_column(testRaw, "SellerName", vector_size=10, min_count=1)
+trainRaw, testRaw = process_text_column(
+    "SellerName", trainRaw, testRaw, vector_size=10, min_count=1
+)
 
 trainRaw.show(3)
 
