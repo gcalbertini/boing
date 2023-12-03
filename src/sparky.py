@@ -3,7 +3,16 @@
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.types import NumericType, StringType, ArrayType, IntegerType
-from pyspark.sql.functions import col, lower, regexp_replace, split, expr, length, when
+from pyspark.sql.functions import (
+    col,
+    lower,
+    regexp_replace,
+    split,
+    expr,
+    length,
+    when,
+    from_json,
+)
 from pyspark.ml.feature import RegexTokenizer, Word2Vec, StopWordsRemover
 
 # no truly massive arrays, iterative procedures, simple SQL ops --> Spark on local should be ok
@@ -158,12 +167,6 @@ testRaw, trainRaw = [
         lower(regexp_replace(col("VehColorInt"), "[^a-zA-Z0-9]", "")),
     )
     .withColumn(
-        "VehFeats",
-        lower(
-            regexp_replace(col("VehFeats"), "[^a-zA-Z0-9/ ]", "")
-        ),  # keep '/ ' for AM/FM etc and space separation
-    )
-    .withColumn(
         "VehDriveTrain",
         lower(
             regexp_replace(col("VehDriveTrain"), "[^a-zA-Z0-9/]", "")
@@ -184,6 +187,7 @@ testRaw, trainRaw = [
     .withColumn(
         "VehHistory", split(col("VehHistory"), ",").cast(ArrayType(StringType()))
     )
+    .withColumn("VehFeats", from_json(col("VehFeats"), ArrayType(StringType())))
     for df in [testRaw, trainRaw]
 ]
 
@@ -294,18 +298,6 @@ trainRaw = process_text_column(
 )
 testRaw = process_text_column(testRaw, "VehSellerNotes", vector_size=100, min_count=2)
 
-# We would like to do the same for VehFeatures but see missing values that can't just be 'None.' as some may have features. The issue is
-# that even if cars share same make, model, and trim there may be orderable options that are added, region-specific features, or yearly mfg changes
-# that intro variability. Even if minimal, impact of one or two features may make a difference -- we just don't know.
-# Decision here is to drop relatively negl rows for which this is the case (see logs)
-trainRaw = trainRaw.na.drop(subset=["VehFeats"])
-testRaw = testRaw.na.drop(subset=["VehFeats"])
-
-# can fine tune in other endeavors; note instead of vectorizing can explode as separate features but may lead to sparsity or much more
-# work to condense features, i.e. can have 'adjustable wheel' vs 'adjustable steering wheel' vs 'wheels adjust' vs 'adjustable wheels' for intended binary feature ADJ_WHEEL
-trainRaw = process_text_column(trainRaw, "VehFeats", vector_size=50, min_count=5)
-testRaw = process_text_column(testRaw, "VehFeats", vector_size=50, min_count=2)
-
 # Since seller name does not have any nulls and 700+ types lets do a last min tokenization (see logs)
 # making sure all names are considered for training. Alt could use something like a dummy variable but introduces
 # a lot of sparsity in the design matrix
@@ -346,18 +338,13 @@ testRaw = testRaw.drop("ListingID")
 
 # The last thing we shall do is drop rows < 10 missing values for impacted columns
 colDropTrain = ["SellerZip", "VehListdays", "VehMileage", "SellerListSrc", "VehFuel"]
-colDropTest = ["VehColorExt", "VehMileage"]
 train = trainRaw.na.drop(subset=[*colDropTrain])
-test = testRaw.na.drop(subset=[*colDropTest])
 
 
 # Print the number of columns (note additional 2 on train for y)
 print(f"The outgoing Train DataFrame is {train.count()} by {len(train.columns)}.")
-print(f"The outgoing Test DataFrame is  {test.count()} by {len(test.columns)}.")
+print(f"The outgoing Test DataFrame is  {testRaw.count()} by {len(testRaw.columns)}.")
 
 # Save the Pandas DataFrame to a CSV file
 train.toPandas().to_csv(folderPath + "/train_sparked.csv", index=False)
-test.toPandas().to_csv(folderPath + "/test_sparked.csv", index=False)
-
-
-spark.stop()
+testRaw.toPandas().to_csv(folderPath + "/test_sparked.csv", index=False)
