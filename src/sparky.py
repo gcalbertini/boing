@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 
 import os
+import numpy
 from pyspark.sql import SparkSession
-from pyspark.sql.types import NumericType, StringType, ArrayType, IntegerType
+from pyspark.sql.types import (
+    NumericType,
+    StringType,
+    ArrayType,
+    IntegerType,
+)
 from pyspark.sql.functions import (
     col,
     lower,
@@ -12,6 +18,8 @@ from pyspark.sql.functions import (
     length,
     when,
     from_json,
+    sum,
+    sqrt,
 )
 from pyspark.ml.feature import RegexTokenizer, Word2Vec, StopWordsRemover
 
@@ -177,11 +185,16 @@ testRaw, trainRaw = [
             regexp_replace(col("VehDriveTrain"), "[^a-zA-Z0-9/]", "")
         ),  # keep '/' for 4x4/AWD etc
     )
+    .withColumn(
+        "VehHistory",
+        lower(col("VehHistory")),
+    )
+    .withColumn(
+        "VehFeats",
+        lower(col("VehFeats")),
+    )
     for df in [testRaw, trainRaw]
 ]
-
-feats = trainRaw.select("VehFeats").limit(3)
-feats.show()
 
 # Vectorize array 'string' types that may contain richer info and cast for new schema
 testRaw, trainRaw = [
@@ -207,11 +220,24 @@ testRaw, trainRaw = [
 ]
 
 # Now remove owner entry from original col entries. Note VehHistory has
-# at most 5 elements per entry (see log file), go up to 6 to be safe?
+# at most 5 elements per entry (see log file)
 testRaw, trainRaw = [
-    df.withColumn("VehHistory", expr("slice(VehHistory, 2, 6)"))
+    df.withColumn(
+        "VehHistory", expr("slice(VehHistory, 2, 5)").cast(ArrayType(StringType()))
+    )
     for df in [testRaw, trainRaw]
 ]
+# remove annoying intial whitespace in each entry
+testRaw, trainRaw = [
+    df.withColumn(
+        "VehHistory",
+        expr("transform(VehHistory, element -> trim(element))").cast(
+            ArrayType(StringType())
+        ),
+    )
+    for df in [testRaw, trainRaw]
+]
+
 
 # We should find 201 null entries here to match the nulls from original column
 nullEntryCount = trainRaw.filter(col("NumOwners").isNull()).count()
@@ -219,6 +245,8 @@ print(f"New column for owners contains {nullEntryCount}/201 null entries in trai
 
 # More testing can be done to see impacts of splitting up vectorized features
 # or see sentiment attached with certain elements in the entries
+
+# As for zipcode, lets explode to make a more natural vector, so 12345 becomes [1,2,3,4,5]
 
 # There are only so many VehDriveTrain options. Replace drive with 'D', all with 'A' etc
 
@@ -310,6 +338,7 @@ def process_text_column(input_col, trainX, testX, vector_size=20, min_count=3):
         minCount=min_count,
         inputCol=f"Word2Vec2_{input_col}",
         outputCol=f"Word2Vec_{input_col}",
+        seed=42,
     )
     model = word2vec.fit(trainX)
     trainX = model.transform(trainX)
@@ -333,6 +362,7 @@ trainRaw, testRaw = process_text_column(
     "VehSellerNotes", trainRaw, testRaw, vector_size=100, min_count=10
 )
 
+
 # No nulls in the data for seller cities (1300+ uniques). There is somewhat considerable verbal diversity here and it may be beneficial
 # to capture similarity between cities and understand the relationships between them when predicting the trim-price label
 # (e.g., a 2020 Honda Vroomvroom is $X in these coastal cities and $Y in this other region of cities and has Z% higher price for 2021 model).
@@ -341,6 +371,7 @@ trainRaw, testRaw = process_text_column(
 trainRaw, testRaw = process_text_column(
     "SellerCity", trainRaw, testRaw, vector_size=25, min_count=3
 )
+
 # Since seller name does not have any nulls and 700+ types lets do a last min tokenization (see logs)
 # making sure all names are considered for training. Alt could use something like a dummy variable but introduces
 # a lot of sparsity in the design matrix. See similar notes above.
@@ -392,3 +423,6 @@ print(f"The outgoing Test DataFrame is  {testRaw.count()} by {len(testRaw.column
 # Save the Pandas DataFrame to a CSV file
 train.toPandas().to_csv(folderPath + "/train_sparked.csv", index=False)
 testRaw.toPandas().to_csv(folderPath + "/test_sparked.csv", index=False)
+
+train.printSchema()
+testRaw.printSchema()
