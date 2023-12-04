@@ -2,3 +2,7 @@
 pyspark
 pandas
 numpy
+statsmodels
+scipy
+torch
+scikit-learn
