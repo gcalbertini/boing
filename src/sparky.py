@@ -286,7 +286,8 @@ trainRaw = trainRaw.withColumn(
     when(col("ListingID") == 4199245, "awd").otherwise(col("VehDriveTrain")),
 )
 
-# Lastly also note that 4wd and 4x4 are the same thing; opt to 4wd
+
+# NOTE that 4wd and 4x4 are the same thing; opt to 4wd
 testRaw, trainRaw = [
     df.withColumn(
         "VehDriveTrain", regexp_replace("VehDriveTrain", "4x4", "4wd")
@@ -294,6 +295,12 @@ testRaw, trainRaw = [
     for df in [testRaw, trainRaw]
 ]
 
+# NOTE awd/4wd and 4wd/awd mean the same thing! Choose one so later encoding doesn't suggest they are unique
+
+trainRaw = trainRaw.withColumn(
+    "VehDriveTrain",
+    when(col("VehDriveTrain") == "awd/4wd", "4wd/awd").otherwise(col("VehDriveTrain")),
+)
 trainRaw.show(2)
 
 
@@ -358,9 +365,9 @@ def process_text_column(input_col, trainX, testX, vector_size=20, min_count=3):
 # Larger vector sizes might be more suitable when dealing with a ``vast`` vocabulary here or when words have multiple meanings,
 # as the model has more dimensions to differentiate between these nuances. Keep in mind this is a miniature text corpus and that about a third seemed
 # to be duplicate (perhaps standard or saved) note entries from certain dealers
-#trainRaw, testRaw = process_text_column(
+# trainRaw, testRaw = process_text_column(
 #    "VehSellerNotes", trainRaw, testRaw, vector_size=100, min_count=10
-#)
+# )
 
 
 # No nulls in the data for seller cities (1300+ uniques). There is somewhat considerable verbal diversity here and it may be beneficial
@@ -368,16 +375,16 @@ def process_text_column(input_col, trainX, testX, vector_size=20, min_count=3):
 # (e.g., a 2020 Honda Vroomvroom is $X in these coastal cities and $Y in this other region of cities and has Z% higher price for 2021 model).
 # Let's make sure cities where most cars are sold have greater semantic weight so min count set to 3 in corpus
 # A smaller vector size, such as 30, would result in more compact representations but might capture simpler relationships between names
-#trainRaw, testRaw = process_text_column(
+# trainRaw, testRaw = process_text_column(
 #    "SellerCity", trainRaw, testRaw, vector_size=25, min_count=3
-#)
+# )
 
 # Since seller name does not have any nulls and 700+ types lets do a last min tokenization (see logs)
 # making sure all names are considered for training. Alt could use something like a dummy variable but introduces
 # a lot of sparsity in the design matrix. See similar notes above.
-#trainRaw, testRaw = process_text_column(
+# trainRaw, testRaw = process_text_column(
 #    "SellerName", trainRaw, testRaw, vector_size=25, min_count=3
-#)
+# )
 
 
 trainRaw.show(3)
