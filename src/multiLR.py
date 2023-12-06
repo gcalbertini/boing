@@ -3,6 +3,7 @@ import os
 import json
 import math
 import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 ## Imports for plotting
 import matplotlib.pyplot as plt
@@ -22,6 +23,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data
 import torch.optim as optim
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader
 
 DATASET_PATH = "../data"
 # Path to the folder where the pretrained models are saved
@@ -59,7 +62,7 @@ number of iters = number of passes, each pass using [batch size] num samples
 if had 90/20 with drop_last as True in dataloader would get 4 iter/ep for consistent batch size
 '''
 
-class load_data:
+class load_data(Dataset):
     def __init__(self):
         X_train = np.loadtxt(
             "./data/py_training_X.csv", delimiter=",", dtype=np.float64
@@ -94,6 +97,7 @@ class load_data:
         # n_samples x 30; format is [[a], [b], [c]]
         self.target_enc = torch.from_numpy(y_enc[:, 0:])
 
+	# idk if this is overriding but can change
     def __tensors__(self, encoded=True):
         if encoded:
             return self.train, self.target_enc
@@ -108,5 +112,12 @@ data = load_data()
 n_samples = len(data)
 features, enc_labels = data.__tensors__(encoded=True)
 _, labels = data.__tensors__(False)
-print('lol')
+
+# need to get the standard location-scale to keep
+# in the same distribution space as sklearn ft we imported
+# for the price
+scaler = StandardScaler()
+arr_norm = scaler.fit_transform(enc_labels[:,-1].numpy().reshape(-1,1))
+enc_labels[:,-1] = torch.from_numpy(arr_norm).view(1, n_samples) 
+
 
