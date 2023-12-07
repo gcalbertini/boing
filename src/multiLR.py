@@ -133,7 +133,8 @@ print("Data point 0:", dataset[0])
 
 train_size = int(0.8 * n_samples)
 test_size = n_samples - train_size
-batch_size = 256
+batch_size = 64
+learning_rate = 0.0009
 n_iterations = math.ceil(n_samples / batch_size)
 train_data_loader = data.DataLoader(
     dataset=dataset, batch_size=batch_size, shuffle=True
@@ -166,26 +167,26 @@ class TwoLabelLogRegression(nn.Module):
 
     def forward(self, x):
         trim_logits = self.trim_linear(x)
-        price_logits = self.price_linear(x)
+        price_vals = self.price_linear(x)
         # nn.BCEWithLogitsLoss() combines a sigmoid layer and the BCE
         # loss in a single process adjusting for positive numbers
         # applied to the log leading to overflow; this is why we won't
         # apply sigmoid to output of model in this case
         # https://github.com/phlippe/uvadlc_notebooks/blob/master/docs/tutorial_notebooks/tutorial2/Introduction_to_PyTorch.ipynb
         # note: will note be needed for trim as they are for multiclass and already have 0/1 inputs
-        return trim_logits, price_logits
+        return trim_logits, price_vals
 
 
-learning_rate = 0.05
 model = TwoLabelLogRegression(n_input_features, num_trim_classes=num_trim_classes)
 model.to(device)
 print("The parameters: ", list(model.parameters()))
 
-loss_module = nn.BCEWithLogitsLoss()
+loss_trim = nn.BCEWithLogitsLoss()
+loss_price = nn.MSELoss()
 optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
 
-def train_model(model, optimizer, train_data_loader, loss_module, num_epochs=100):
+def train_model(model, optimizer, train_data_loader, loss_price, loss_trim, num_epochs=100):
     # Set model to train mode
     model.train()
     # Training loop
@@ -203,11 +204,12 @@ def train_model(model, optimizer, train_data_loader, loss_module, num_epochs=100
 
                 ## Step 2: Run the model on the input data; BCEWithLogitsLoss will apply the
                 ## sigmoid for us
-                pred_trim_logits, pred_price_logits = model(features)
+                pred_trim_logits, pred_price_vals = model(features)
 
-                ## Step 3: Calculate the loss
-                trim_loss = loss_module(pred_trim_logits, trim_labels)
-                price_loss = loss_module(pred_price_logits, price_labels)
+                ## Step 3: Calculate the loss --> recall -log(p) for BCE means anything near .693
+                # is about random aka about 50% samples correctly classified -->
+                trim_loss = loss_trim(pred_trim_logits, trim_labels)
+                price_loss = loss_price(pred_price_vals, price_labels)
 
                 total_loss = trim_loss + price_loss
 
@@ -223,10 +225,9 @@ def train_model(model, optimizer, train_data_loader, loss_module, num_epochs=100
 
 
                 pbar.update(1)  
-                pbar.set_postfix({"Total Loss": total_loss.item()})
+                pbar.set_postfix({"Total Loss": total_loss.item(), "Trim Loss": trim_loss.item(), "Price Loss": price_loss.item()})
 
-
-train_model(model, optimizer, train_data_loader, loss_module)
+train_model(model, optimizer, train_data_loader, loss_price, loss_trim)
 
 """
 
