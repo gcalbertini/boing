@@ -128,8 +128,9 @@ class car_data(data.Dataset):
     def get_scaler_params(self):
         return self.mean_value, self.std_dev_value
 
-    def get_trim_label_names(self):
-        return self.label_names
+    def get_label_encoder(self):
+        label_encoder = joblib.load('./src/label_encoder.joblib')
+        return label_encoder
 
 
 class MLT_log_reg(nn.Module):
