@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.nn.functional import softmax
 from datetime import datetime
+from tensorboardX import SummaryWriter
 
 sns.set()
 
@@ -132,55 +133,6 @@ class car_data(data.Dataset):
         return self.X_test
 
 
-dataset = car_data()
-n_samples = len(dataset)
-
-print("Size of dataset:", n_samples)
-print("Data point 0:", dataset[0])
-
-
-train_size = int(0.8 * n_samples)
-val_size = n_samples - train_size
-train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
-
-batch_size = 2**7
-learning_rate = 0.0001
-weight_decay = 0
-momentum = 0
-
-
-train_data_loader = data.DataLoader(
-    dataset=train_dataset,
-    batch_size=batch_size,
-    shuffle=True,  # Shuffle the training set during training
-)
-
-val_data_loader = data.DataLoader(
-    dataset=val_dataset,
-    batch_size=batch_size,
-    shuffle=False,  # Do not shuffle the validation set during validation
-)
-
-
-# next(iter(...)) catches the first batch of the data loader
-# If shuffle is True, this will return a different batch every time we run this cell
-# For iterating over the whole dataset, we can simple use "for batch in train_data_loader: ..."
-sample = next(iter(train_data_loader))
-n_input_features = sample["features"].shape[1]
-num_trim_classes = sample["labels"]["trim_label"].shape[1]
-print(f"Keys in our sample batch: {sample.keys()}")
-print(f"Size for the features in our sample batch: {sample['features'].shape}")
-print(
-    f"Size for the trim target in our sample batch: {sample['labels']['trim_label'].shape}"
-)
-print(f"Targets for each trim batch in our sample: {sample['labels']['trim_label']}")
-print(
-    f"Size for the price target in our sample batch: {sample['labels']['price_label'].shape}"
-)
-print(f"Targets for each price batch in our sample: {sample['labels']['price_label']}")
-
-
-# wx+b with sigmoid at the end
 class MLT_log_reg(nn.Module):
     def __init__(self, n_input_features, num_trim_classes):
         super(MLT_log_reg, self).__init__()
@@ -206,34 +158,16 @@ class MLT_log_reg(nn.Module):
         return torch.sigmoid(trim_non_logits), price_vals
 
 
-model = MLT_log_reg(n_input_features, num_trim_classes=num_trim_classes)
-model.to(device)
-
-# NOTE reduction by mean default means loss will be normalized by batch size
-# to get a loss per epoch can set to sum or mult by batch size and then divide by
-# entire dataset size
-# CrossEntropyLoss combines nn.LogSoftmax() in model followed by nn.NLLLoss() criterion in one single go assuming input is logits (softmax'd)
-# The softmax function returns probabilities between [0, 1] where sum *across classes* sum to 1; log of these probabilities
-# returns values between [-inf, 0], since log(0) = -inf and log(1) = 0
-trim_criterion = nn.CrossEntropyLoss()  # need input in logits
-price_criterion = (
-    nn.HuberLoss()
-)  # see notes in EDA; we did not sift out outliers in totality for hetereroscedastic priors
-optimizer = torch.optim.SGD(
-    model.parameters(), lr=learning_rate, momentum=momentum, weight_decay=weight_decay
-)
-print("The parameters: ", list(model.parameters()))
-
-
 def train_model(
     model,
-    optimizer,
     train_data_loader,
-    price_loss,
-    trim_loss,
-    num_epochs=50,
-    val_data_loader=val_data_loader,
-    patience=25,
+    val_data_loader,
+    trim_criterion,
+    price_criterion,
+    optimizer,
+    num_epochs=100,
+    patience=30,
+    max_grad_norm=1,
 ):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     # Set model to train mode
@@ -283,6 +217,9 @@ def train_model(
                 optimizer.zero_grad()
                 total_loss.backward()
 
+                ## Step 4.5: Gradient clip to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
                 ## Step 5: Update the parameters
                 optimizer.step()
 
@@ -294,6 +231,9 @@ def train_model(
                         "Price Loss (Huber)": price_loss.item(),
                     }
                 )
+                writer.add_scalar("Total Loss", total_loss.item(), epoch + 1)
+                writer.add_scalar("Trim Loss (CrossEnt)", trim_loss.item(), epoch + 1)
+                writer.add_scalar("Price Loss (Huber)", price_loss.item(), epoch + 1)
 
         # Evaluate on the validation set if provided
         if val_data_loader is not None:
@@ -302,6 +242,11 @@ def train_model(
                 "Total Loss"
             ]  # Adjust this based on metric for early stopping
             print(f"Validation Loss after epoch {epoch + 1}: {val_loss}\n")
+            writer.add_scalar("Validation Loss Epoch", val_loss, epoch + 1)
+            writer.add_scalars(
+                f"Val_Train_Loss",
+                {"Val_Loss_Epoch": val_loss, "Train_Loss": total_loss},
+            )
 
             # Check for early stopping
             if val_loss < best_loss:
@@ -313,7 +258,7 @@ def train_model(
             if consecutive_no_improvement >= patience or epoch == num_epochs - 1:
                 print(f"Saving model weights after epoch {epoch + 1}.")
                 # Save the model weights
-                model_path = "model_{}_{}".format(timestamp, epoch)
+                model_path = "model_{}_{}".format(timestamp, epoch + 1)
                 if not os.path.exists(CHECKPOINT_PATH):
                     os.makedirs(CHECKPOINT_PATH)
                 torch.save(model.state_dict(), CHECKPOINT_PATH + model_path)
@@ -358,19 +303,146 @@ def evaluate_model(model, data_loader, price_loss, trim_loss):
     }
 
 
-# Example usage:
-train_model(
-    model,
-    optimizer,
-    train_data_loader,
-    price_criterion,
-    trim_criterion,
-    num_epochs=10,
-)
+def generate_predictions_with_labels(model_name, test_data_loader):
+    # Load the pre-trained model weights only if the file exists
+    model_weights_path = CHECKPOINT_PATH + model_name
+    if os.path.exists(model_weights_path):
+        model.load_state_dict(torch.load(model_weights_path))
+        model.to(device)
+        model.eval()
+    else:
+        raise NotImplemented
 
-# val_metrics = evaluate_model(model, val_data_loader, price_loss, trim_loss)
-# print(f"Validation Metrics: {val_metrics}")
+    # Set the model to evaluation mode
+    model.eval()
+
+    all_predictions = {"trim": [], "price": []}
+    all_labels = {"trim": [], "price": []}
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_data_loader):
+            features = batch["features"].to(device)
+            trim_labels = batch["labels"]["trim_label"].cpu().numpy()
+            price_labels = batch["labels"]["price_label"].cpu().numpy()
+
+            # Forward pass
+            pred_trim_logits, pred_price_vals = model(features)
+
+            # Convert predictions to probabilities and append to the list
+            all_predictions["trim"].extend(
+                torch.sigmoid(pred_trim_logits).cpu().numpy()
+            )
+            all_predictions["price"].extend(pred_price_vals.cpu().numpy())
+
+            # Append ground truth labels to the list
+            all_labels["trim"].extend(trim_labels)
+            all_labels["price"].extend(price_labels)
+
+    # Convert the lists to numpy arrays
+    all_predictions["trim"] = np.array(all_predictions["trim"])
+    all_predictions["price"] = np.array(all_predictions["price"])
+    all_labels["trim"] = np.array(all_labels["trim"])
+    all_labels["price"] = np.array(all_labels["price"])
+
+    # Set the model back to train mode
+    model.train()
+
+    return all_predictions, all_labels
 
 
 if __name__ == "__main__":
-    pass
+    dataset = car_data()
+    n_samples = len(dataset)
+
+    print("Size of dataset:", n_samples)
+    print("Data point 0:", dataset[0])
+
+    train_size = int(0.8 * n_samples)
+    val_size = n_samples - train_size
+    train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
+
+    batch_size = 64
+    learning_rate = 0.005
+    weight_decay = 0
+    momentum = 0
+
+    train_data_loader = data.DataLoader(
+        dataset=train_dataset,
+        batch_size=batch_size,
+        shuffle=True,  # Shuffle the training set during training
+    )
+
+    val_data_loader = data.DataLoader(
+        dataset=val_dataset,
+        batch_size=batch_size,
+        shuffle=False,  # Do not shuffle the validation set during validation
+    )
+
+    # next(iter(...)) catches the first batch of the data loader
+    # If shuffle is True, this will return a different batch every time we run this cell
+    # For iterating over the whole dataset, we can simple use "for batch in train_data_loader: ..."
+    sample = next(iter(train_data_loader))
+    n_input_features = sample["features"].shape[1]
+    num_trim_classes = sample["labels"]["trim_label"].shape[1]
+    print(f"Keys in our sample batch: {sample.keys()}")
+    print(f"Size for the features in our sample batch: {sample['features'].shape}")
+    print(
+        f"Size for the trim target in our sample batch: {sample['labels']['trim_label'].shape}"
+    )
+    print(
+        f"Targets for each trim batch in our sample: {sample['labels']['trim_label']}"
+    )
+    print(
+        f"Size for the price target in our sample batch: {sample['labels']['price_label'].shape}"
+    )
+    print(
+        f"Targets for each price batch in our sample: {sample['labels']['price_label']}"
+    )
+
+    model = MLT_log_reg(n_input_features, num_trim_classes=num_trim_classes)
+    model.to(device)
+
+    # NOTE reduction by mean default means loss will be normalized by batch size
+    # to get a loss per epoch can set to sum or mult by batch size and then divide by
+    # entire dataset size
+    # CrossEntropyLoss combines nn.LogSoftmax() in model followed by nn.NLLLoss() criterion in one single go assuming input is logits (softmax'd)
+    # The softmax function returns probabilities between [0, 1] where sum *across classes* sum to 1; log of these probabilities
+    # returns values between [-inf, 0], since log(0) = -inf and log(1) = 0
+    trim_criterion = nn.CrossEntropyLoss()  # need input in logits
+    price_criterion = (
+        nn.HuberLoss()
+    )  # see notes in EDA; we did not sift out outliers in totality for hetereroscedastic priors
+    # https://stats.stackexchange.com/questions/313862/huber-loss-on-top-of-cross-entropy
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=learning_rate,
+        momentum=momentum,
+        weight_decay=weight_decay,
+    )
+    print("The parameters: ", list(model.parameters()))
+
+    '''
+    writer = SummaryWriter()
+    train_model(
+        model=model,
+        train_data_loader=train_data_loader,
+        val_data_loader=val_data_loader,
+        trim_criterion=trim_criterion,
+        price_criterion=price_criterion,
+        optimizer=optimizer,
+        num_epochs=1500,
+        patience=30,
+        max_grad_norm=1,
+    )
+    writer.close()
+    '''
+
+    test_data_loader = data.DataLoader(
+        dataset=dataset.get_test_set(),
+        batch_size=batch_size,
+        shuffle=False,  # Do not shuffle the test set during inference
+    )
+
+    all_predictions, all_labels = generate_predictions_with_labels(
+        model_name='model_{}_{}'.format(), test_data_loader=test_data_loader
+    )
