@@ -8,6 +8,7 @@ from sklearn.preprocessing import StandardScaler
 ## Imports for plotting
 import matplotlib.pyplot as plt
 import seaborn as sns
+from torch.nn.functional import softmax
 
 sns.set()
 
@@ -17,7 +18,6 @@ from tqdm import tqdm
 ## PyTorch
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data as data
 
@@ -134,7 +134,11 @@ print("Data point 0:", dataset[0])
 train_size = int(0.8 * n_samples)
 test_size = n_samples - train_size
 batch_size = 64
-learning_rate = 0.0009
+learning_rate = 0.00008
+weight_decay = 0
+momentum = 0
+
+
 n_iterations = math.ceil(n_samples / batch_size)
 train_data_loader = data.DataLoader(
     dataset=dataset, batch_size=batch_size, shuffle=True
@@ -159,34 +163,41 @@ print(f"Targets for each price batch in our sample: {sample['labels']['price_lab
 
 
 # wx+b with sigmoid at the end
-class TwoLabelLogRegression(nn.Module):
+class MLT_log_reg(nn.Module):
     def __init__(self, n_input_features, num_trim_classes):
-        super(TwoLabelLogRegression, self).__init__()
+        super(MLT_log_reg, self).__init__()
         self.trim_linear = nn.Linear(n_input_features, num_trim_classes)
         self.price_linear = nn.Linear(n_input_features, 1)
+        #Fight off co-adaptation (when multiple neurons in a layer extract the same, or very similar, hidden features from the input data)
+        # So p% of nodes in input and hidden layer dropped in every iteration (batch) --> sparsity
+        # By using dropout, in every iteration, you will work on a smaller neural network
+        # than the previous one and, therefore, approaches regularization which (when using MSE)
+        # shrinks the squared norm of the weights --> reduce overfitting
+        self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x):
-        trim_logits = self.trim_linear(x)
+        x = self.dropout(x)
+        trim_non_logits = self.trim_linear(x)
         price_vals = self.price_linear(x)
-        # nn.BCEWithLogitsLoss() combines a sigmoid layer and the BCE
-        # loss in a single process adjusting for positive numbers
-        # applied to the log leading to overflow; this is why we won't
-        # apply sigmoid to output of model in this case
-        # https://github.com/phlippe/uvadlc_notebooks/blob/master/docs/tutorial_notebooks/tutorial2/Introduction_to_PyTorch.ipynb
-        # note: will note be needed for trim as they are for multiclass and already have 0/1 inputs
-        return trim_logits, price_vals
+        return softmax(trim_non_logits), price_vals
 
 
-model = TwoLabelLogRegression(n_input_features, num_trim_classes=num_trim_classes)
+model = MLT_log_reg(n_input_features, num_trim_classes=num_trim_classes)
 model.to(device)
+
+# NOTE reduction by mean default means loss will be normalized by batch size
+# to get a loss per epoch can set to sum or mult by batch size and then divide by
+# entire dataset size 
+# CrossEntropyLoss combines nn.LogSoftmax() in model followed by nn.NLLLoss() criterion in one single go assuming input is logits (softmax'd)
+# The softmax function returns probabilities between [0, 1] where sum *across classes* sum to 1; log of these probabilities 
+# returns values between [-inf, 0], since log(0) = -inf and log(1) = 0
+loss_trim = nn.CrossEntropyLoss() # need input in logits
+loss_price = nn.MSELoss()
+optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum, weight_decay=weight_decay)
 print("The parameters: ", list(model.parameters()))
 
-loss_trim = nn.BCEWithLogitsLoss()
-loss_price = nn.MSELoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-
-
-def train_model(model, optimizer, train_data_loader, loss_price, loss_trim, num_epochs=100):
+nn.NLLLoss
+def train_model(model, optimizer, train_data_loader, loss_price, loss_trim, trim_weight = 1.0, price_weight = 1.0, num_epochs=50):
     # Set model to train mode
     model.train()
     # Training loop
@@ -207,22 +218,20 @@ def train_model(model, optimizer, train_data_loader, loss_price, loss_trim, num_
                 pred_trim_logits, pred_price_vals = model(features)
 
                 ## Step 3: Calculate the loss --> recall -log(p) for BCE means anything near .693
-                # is about random aka about 50% samples correctly classified -->
-                trim_loss = loss_trim(pred_trim_logits, trim_labels)
+                # is about random aka about 50% samples correctly classified 
+                trim_loss = loss_trim(pred_trim_logits, trim_labels) # loss we chose here will apply log to logits then get negative log likelihood loss
                 price_loss = loss_price(pred_price_vals, price_labels)
 
-                total_loss = trim_loss + price_loss
+                total_loss =  price_weight * price_loss #trim_weight * trim_loss +
 
                 ## Step 4: Perform backpropagation
                 # Before calculating the gradients, we need to ensure that they are all zero.
                 # The gradients would not be overwritten, but actually added to the existing ones.
                 optimizer.zero_grad()
-                # Perform backpropagation
                 total_loss.backward()
 
                 ## Step 5: Update the parameters
                 optimizer.step()
-
 
                 pbar.update(1)  
                 pbar.set_postfix({"Total Loss": total_loss.item(), "Trim Loss": trim_loss.item(), "Price Loss": price_loss.item()})
