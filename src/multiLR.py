@@ -1,6 +1,8 @@
 ## Standard libraries
+from collections import ChainMap
 import os
 import numpy as np
+import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 ## Imports for plotting
@@ -70,7 +72,7 @@ class car_data(data.Dataset):
             DATASET_PATH + "/py_training_X.csv", delimiter=",", dtype=np.float32
         )  # float54 used in nb but 32 is what pytorch model takes
         X_test = np.loadtxt(
-            DATASET_PATH + "/py_training_X.csv", delimiter=",", dtype=np.float32
+            DATASET_PATH + "/py_test_X.csv", delimiter=",", dtype=np.float32
         )
         X_features = np.loadtxt(
             DATASET_PATH + "/py_X_ft_names.csv", delimiter=",", dtype=np.str_
@@ -301,7 +303,7 @@ def evaluate_model(model, data_loader, price_loss, trim_loss):
 
 
 def generate_predictions_with_labels(
-    model_name, test_set, price_scaler_mean, price_scaler_std, y_enc_features
+    model_name, test_set, price_scaler_mean, price_scaler_std, y_enc_features, listing_id
 ):
     # Load the pre-trained model weights only if the file exists
     model_weights_path = CHECKPOINT_PATH + model_name
@@ -320,14 +322,14 @@ def generate_predictions_with_labels(
 
     with torch.no_grad():
         # Forward pass
-        pred_trim_logits, pred_price_vals = model(features)
+        pred_trim_logits, pred_price_scaled_vals = model(features)
 
         label_trim = torch.argmax(pred_trim_logits, dim=1).cpu().numpy()
-        pred_price_vals = pred_price_vals.cpu().numpy()
+        pred_price_scaled_vals = pred_price_scaled_vals.cpu().numpy()
 
         # Reverse the standard scaling for the price labels
         label_price = np.round(
-            (pred_price_vals * price_scaler_std) + price_scaler_mean, 2
+            (pred_price_scaled_vals * price_scaler_std) + price_scaler_mean, 2
         )
 
         # Map the argmax indices to corresponding feature names
@@ -344,12 +346,21 @@ def generate_predictions_with_labels(
     # Set the model back to train mode
     model.train()
 
+    # Create a DataFrame with the required columns
+    predictions_df = pd.DataFrame({
+        'ID': listing_id.tolist(),
+        'Trim_Feature_Names': label_trim_feature_names,
+        'Price_Label': [item for sublist in label_price.tolist() for item in sublist]
+    })
+
+    # Save the DataFrame to a CSV file
+    predictions_df.to_csv("./src/predictions.csv", index=False)
+
     return {
-        "trim": label_trim,
-        "trim_feature_names": label_trim_feature_names,
+        "trim": label_trim_feature_names,
         "price": label_price,
-        "trim_probs": pred_trim_logits,
-        "price_vals": pred_price_vals,
+        "trim_probs": label_trim,
+        "price_caled_vals": pred_price_scaled_vals,
     }
 
 
@@ -454,4 +465,5 @@ if __name__ == "__main__":
         price_scaler_std=sigma,
         price_scaler_mean=mu,
         y_enc_features=dataset.get_trim_label_names(),
+        listing_id = dataset.get_test_id()
     )
