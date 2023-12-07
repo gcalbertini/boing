@@ -77,19 +77,15 @@ class car_data(data.Dataset):
         X_features = np.loadtxt(
             DATASET_PATH + "/py_X_ft_names.csv", delimiter=",", dtype=np.str_
         )
-        y_enc = np.loadtxt(
+        y_train = np.loadtxt(
             DATASET_PATH + "/py_y_enc_train.csv", delimiter=",", dtype=np.float32
-        )
-        y_enc_features = np.loadtxt(
-            "./src/transformed_feature_names_y.csv", delimiter=",", dtype=np.str_
         )
         self.listingID = np.loadtxt(
             DATASET_PATH + "/py_test_id.csv", delimiter=",", dtype="i8"
-        )  # 64-bit signed integer used in nb
+        ) 
 
         self.X_test = torch.from_numpy(X_test)
         self.X_train = torch.from_numpy(X_train)
-        self.label_names = y_enc_features
         self.n_samples = X_train.shape[0]
         self.X_features = X_features
 
@@ -97,13 +93,13 @@ class car_data(data.Dataset):
         # need to get the standard location-scale to keep
         # in the same distribution space as sklearn ft we imported
         scaler = StandardScaler()
-        arr_norm = scaler.fit_transform(y_enc[:, -1].reshape(self.n_samples, 1))
+        arr_norm = scaler.fit_transform(y_train[:, -1].reshape(self.n_samples, 1))
         self.mean_value = scaler.mean_
         self.std_dev_value = scaler.scale_
 
         self.price_labels = torch.from_numpy(arr_norm)
         self.trim_labels = torch.from_numpy(
-            y_enc[:, :-1]
+            y_train[:, :-1]
         )  # trim labels are in the first 29 columns
 
     def __len__(self):
