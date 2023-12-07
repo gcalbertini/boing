@@ -13,3 +13,4 @@ ipywidgets
 widgetsnbextension
 tensorboardX
 joblib
+imbalanced-learn
