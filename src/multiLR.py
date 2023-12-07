@@ -1,16 +1,13 @@
 ## Standard libraries
 import os
-import json
-import math
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 ## Imports for plotting
-import matplotlib.pyplot as plt
 import seaborn as sns
-from torch.nn.functional import softmax
 from datetime import datetime
-from tensorboardX import SummaryWriter
+from tensorboardX import SummaryWriter, writer
+import joblib
 
 sns.set()
 
@@ -20,7 +17,6 @@ from tqdm import tqdm
 ## PyTorch
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.utils.data as data
 
 DATASET_PATH = "./data/"
@@ -79,14 +75,11 @@ class car_data(data.Dataset):
         X_features = np.loadtxt(
             DATASET_PATH + "/py_X_ft_names.csv", delimiter=",", dtype=np.str_
         )
-        y_raw = np.loadtxt(
-            DATASET_PATH + "/py_y_train.csv", delimiter=",", dtype=np.str_
-        )
         y_enc = np.loadtxt(
             DATASET_PATH + "/py_y_enc_train.csv", delimiter=",", dtype=np.float32
         )
         y_enc_features = np.loadtxt(
-            DATASET_PATH + "/py_y_enc_ft_names.csv", delimiter=",", dtype=np.str_
+            "./src/transformed_feature_names_y.csv", delimiter=",", dtype=np.str_
         )
         self.listingID = np.loadtxt(
             DATASET_PATH + "/py_test_id.csv", delimiter=",", dtype="i8"
@@ -94,16 +87,17 @@ class car_data(data.Dataset):
 
         self.X_test = torch.from_numpy(X_test)
         self.X_train = torch.from_numpy(X_train)
+        self.label_names = y_enc_features
         self.n_samples = X_train.shape[0]
-        self.y_enc_names = y_enc_features
         self.X_features = X_features
 
         # for the price
         # need to get the standard location-scale to keep
         # in the same distribution space as sklearn ft we imported
-        arr_norm = StandardScaler().fit_transform(
-            y_enc[:, -1].reshape(self.n_samples, 1)
-        )
+        scaler = StandardScaler()
+        arr_norm = scaler.fit_transform(y_enc[:, -1].reshape(self.n_samples, 1))
+        self.mean_value = scaler.mean_
+        self.std_dev_value = scaler.scale_
 
         self.price_labels = torch.from_numpy(arr_norm)
         self.trim_labels = torch.from_numpy(
@@ -126,11 +120,14 @@ class car_data(data.Dataset):
     def get_test_id(self):
         return self.listingID
 
-    def get_feature_names(self):
-        return self.X_features, self.y_enc_names
-
     def get_test_set(self):
         return self.X_test
+
+    def get_scaler_params(self):
+        return self.mean_value, self.std_dev_value
+
+    def get_trim_label_names(self):
+        return self.label_names
 
 
 class MLT_log_reg(nn.Module):
@@ -303,7 +300,9 @@ def evaluate_model(model, data_loader, price_loss, trim_loss):
     }
 
 
-def generate_predictions_with_labels(model_name, test_data_loader):
+def generate_predictions_with_labels(
+    model_name, test_set, price_scaler_mean, price_scaler_std, y_enc_features
+):
     # Load the pre-trained model weights only if the file exists
     model_weights_path = CHECKPOINT_PATH + model_name
     if os.path.exists(model_weights_path):
@@ -316,38 +315,42 @@ def generate_predictions_with_labels(model_name, test_data_loader):
     # Set the model to evaluation mode
     model.eval()
 
-    all_predictions = {"trim": [], "price": []}
-    all_labels = {"trim": [], "price": []}
+    features = test_set.to(device)
+    feature_names = y_enc_features[1:].tolist()
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(test_data_loader):
-            features = batch["features"].to(device)
-            trim_labels = batch["labels"]["trim_label"].cpu().numpy()
-            price_labels = batch["labels"]["price_label"].cpu().numpy()
+        # Forward pass
+        pred_trim_logits, pred_price_vals = model(features)
 
-            # Forward pass
-            pred_trim_logits, pred_price_vals = model(features)
+        label_trim = torch.argmax(pred_trim_logits, dim=1).cpu().numpy()
+        pred_price_vals = pred_price_vals.cpu().numpy()
 
-            # Convert predictions to probabilities and append to the list
-            all_predictions["trim"].extend(
-                torch.sigmoid(pred_trim_logits).cpu().numpy()
-            )
-            all_predictions["price"].extend(pred_price_vals.cpu().numpy())
+        # Reverse the standard scaling for the price labels
+        label_price = np.round(
+            (pred_price_vals * price_scaler_std) + price_scaler_mean, 2
+        )
 
-            # Append ground truth labels to the list
-            all_labels["trim"].extend(trim_labels)
-            all_labels["price"].extend(price_labels)
+        # Map the argmax indices to corresponding feature names
+        argmax_feature_names = {
+            idx: feature_name for idx, feature_name in enumerate(feature_names)
+        }
 
-    # Convert the lists to numpy arrays
-    all_predictions["trim"] = np.array(all_predictions["trim"])
-    all_predictions["price"] = np.array(all_predictions["price"])
-    all_labels["trim"] = np.array(all_labels["trim"])
-    all_labels["price"] = np.array(all_labels["price"])
+        # Get the string part after "cat__Vehicle_Trim_" for each feature name
+        label_trim_feature_names = [
+            argmax_feature_names[idx].split("cat__Vehicle_Trim_")[1]
+            for idx in label_trim
+        ]
 
     # Set the model back to train mode
     model.train()
 
-    return all_predictions, all_labels
+    return {
+        "trim": label_trim,
+        "trim_feature_names": label_trim_feature_names,
+        "price": label_price,
+        "trim_probs": pred_trim_logits,
+        "price_vals": pred_price_vals,
+    }
 
 
 if __name__ == "__main__":
@@ -362,7 +365,7 @@ if __name__ == "__main__":
     train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
 
     batch_size = 64
-    learning_rate = 0.005
+    learning_rate = 0.008
     weight_decay = 0
     momentum = 0
 
@@ -421,7 +424,7 @@ if __name__ == "__main__":
     )
     print("The parameters: ", list(model.parameters()))
 
-    '''
+    """
     writer = SummaryWriter()
     train_model(
         model=model,
@@ -435,7 +438,7 @@ if __name__ == "__main__":
         max_grad_norm=1,
     )
     writer.close()
-    '''
+    """
 
     test_data_loader = data.DataLoader(
         dataset=dataset.get_test_set(),
@@ -443,6 +446,12 @@ if __name__ == "__main__":
         shuffle=False,  # Do not shuffle the test set during inference
     )
 
-    all_predictions, all_labels = generate_predictions_with_labels(
-        model_name='model_{}_{}'.format(), test_data_loader=test_data_loader
+    mu, sigma = dataset.get_scaler_params()
+
+    all_predictions = generate_predictions_with_labels(
+        model_name="model_20231207_084237_1500",
+        test_set=dataset.get_test_set(),
+        price_scaler_std=sigma,
+        price_scaler_mean=mu,
+        y_enc_features=dataset.get_trim_label_names(),
     )
