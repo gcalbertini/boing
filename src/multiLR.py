@@ -82,7 +82,7 @@ class car_data(data.Dataset):
         )
         self.listingID = np.loadtxt(
             DATASET_PATH + "/py_test_id.csv", delimiter=",", dtype="i8"
-        ) 
+        )
 
         self.X_test = torch.from_numpy(X_test)
         self.X_train = torch.from_numpy(X_train)
@@ -125,7 +125,7 @@ class car_data(data.Dataset):
         return self.mean_value, self.std_dev_value
 
     def get_label_encoder(self):
-        label_encoder = joblib.load('./src/label_encoder.joblib')
+        label_encoder = joblib.load("./src/label_encoder.joblib")
         return label_encoder
 
 
@@ -144,7 +144,7 @@ class MLT_log_reg(nn.Module):
         # https://arxiv.org/abs/2004.13379
         self.trim_weight = nn.Parameter(torch.Tensor([1.0]))
         self.price_weight = nn.Parameter(torch.Tensor([1.0]))
-        self.dropout = nn.Dropout(p=0.1)
+        self.dropout = nn.Dropout(p=0.25)
 
     def forward(self, x):
         x = self.dropout(x)
@@ -315,13 +315,18 @@ def generate_predictions_with_labels(
     model.eval()
 
     features = test_set.to(device)
-    trim_names = label_encoder['preprocessor'].get_feature_names_out()
+    trim_names = label_encoder["preprocessor"].get_feature_names_out()
 
     with torch.no_grad():
         # Forward pass
         pred_trim_logits, pred_price_scaled_vals = model(features)
 
-        inverter = label_encoder.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].inverse_transform
+        inverter = (
+            label_encoder.named_steps["preprocessor"]
+            .named_transformers_["cat"]
+            .named_steps["onehot"]
+            .inverse_transform
+        )
 
         label_trim_names = inverter(pred_trim_logits.cpu().numpy())
         pred_price_scaled_vals = pred_price_scaled_vals.cpu().numpy()
@@ -335,11 +340,13 @@ def generate_predictions_with_labels(
     model.train()
 
     # Create a DataFrame with the required columns
-    predictions_df = pd.DataFrame({
-        'ID': listing_id.tolist(),
-        'Trim_trim_names': label_trim_names.flatten().tolist(),
-        'Price_Label': label_price.flatten().tolist()
-    })
+    predictions_df = pd.DataFrame(
+        {
+            "ID": listing_id.tolist(),
+            "Trim_trim_names": label_trim_names.flatten().tolist(),
+            "Price_Label": label_price.flatten().tolist(),
+        }
+    )
 
     # Save the DataFrame to a CSV file
     predictions_df.to_csv("./src/predictions.csv", index=False)
@@ -362,8 +369,8 @@ if __name__ == "__main__":
     train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
 
     batch_size = 64
-    learning_rate = 0.01 # used .008
-    weight_decay = 1e-3 # l2 regularization
+    learning_rate = 0.02  # used .008
+    weight_decay = 0.001  # l2 regularization
     momentum = 0
 
     train_data_loader = data.DataLoader(
@@ -421,6 +428,7 @@ if __name__ == "__main__":
     )
     print("The parameters: ", list(model.parameters()))
     '''
+    
     writer = SummaryWriter()
     train_model(
         model=model,
@@ -429,12 +437,11 @@ if __name__ == "__main__":
         trim_criterion=trim_criterion,
         price_criterion=price_criterion,
         optimizer=optimizer,
-        num_epochs=1500,
-        patience=30,
+        num_epochs=800,
+        patience=20,
         max_grad_norm=1,
     )
     writer.close()
-    
     '''
 
     test_data_loader = data.DataLoader(
@@ -446,10 +453,10 @@ if __name__ == "__main__":
     mu, sigma = dataset.get_scaler_params()
 
     all_predictions = generate_predictions_with_labels(
-        model_name="model_20231207_170505_323",
+        model_name="model_20231207_202815_117",
         test_set=dataset.get_test_set(),
         price_scaler_std=sigma,
         price_scaler_mean=mu,
-        listing_id = dataset.get_test_id(),
-        label_encoder = dataset.get_label_encoder()
+        listing_id=dataset.get_test_id(),
+        label_encoder=dataset.get_label_encoder(),
     )
