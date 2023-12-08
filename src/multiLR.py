@@ -300,7 +300,7 @@ def evaluate_model(model, data_loader, price_loss, trim_loss):
 
 
 def generate_predictions_with_labels(
-    model_name, test_set, price_scaler_mean, price_scaler_std, y_enc_features, listing_id
+    model_name, test_set, price_scaler_mean, price_scaler_std, listing_id, label_encoder
 ):
     # Load the pre-trained model weights only if the file exists
     model_weights_path = CHECKPOINT_PATH + model_name
@@ -315,13 +315,15 @@ def generate_predictions_with_labels(
     model.eval()
 
     features = test_set.to(device)
-    feature_names = y_enc_features[1:].tolist()
+    trim_names = label_encoder['preprocessor'].get_feature_names_out()
 
     with torch.no_grad():
         # Forward pass
         pred_trim_logits, pred_price_scaled_vals = model(features)
 
-        label_trim = torch.argmax(pred_trim_logits, dim=1).cpu().numpy()
+        inverter = label_encoder.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot'].inverse_transform
+
+        label_trim_names = inverter(pred_trim_logits.cpu().numpy())
         pred_price_scaled_vals = pred_price_scaled_vals.cpu().numpy()
 
         # Reverse the standard scaling for the price labels
@@ -329,35 +331,22 @@ def generate_predictions_with_labels(
             (pred_price_scaled_vals * price_scaler_std) + price_scaler_mean, 2
         )
 
-        # Map the argmax indices to corresponding feature names
-        argmax_feature_names = {
-            idx: feature_name for idx, feature_name in enumerate(feature_names)
-        }
-
-        # Get the string part after "cat__Vehicle_Trim_" for each feature name
-        label_trim_feature_names = [
-            argmax_feature_names[idx].split("cat__Vehicle_Trim_")[1]
-            for idx in label_trim
-        ]
-
     # Set the model back to train mode
     model.train()
 
     # Create a DataFrame with the required columns
     predictions_df = pd.DataFrame({
         'ID': listing_id.tolist(),
-        'Trim_Feature_Names': label_trim_feature_names,
-        'Price_Label': [item for sublist in label_price.tolist() for item in sublist]
+        'Trim_trim_names': label_trim_names.flatten().tolist(),
+        'Price_Label': label_price.flatten().tolist()
     })
 
     # Save the DataFrame to a CSV file
     predictions_df.to_csv("./src/predictions.csv", index=False)
 
     return {
-        "trim": label_trim_feature_names,
+        "trim": label_trim_names,
         "price": label_price,
-        "trim_probs": label_trim,
-        "price_caled_vals": pred_price_scaled_vals,
     }
 
 
@@ -373,8 +362,8 @@ if __name__ == "__main__":
     train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
 
     batch_size = 64
-    learning_rate = 0.008
-    weight_decay = 0
+    learning_rate = 0.01 # used .008
+    weight_decay = 1e-3 # l2 regularization
     momentum = 0
 
     train_data_loader = data.DataLoader(
@@ -431,8 +420,7 @@ if __name__ == "__main__":
         weight_decay=weight_decay,
     )
     print("The parameters: ", list(model.parameters()))
-
-    """
+    '''
     writer = SummaryWriter()
     train_model(
         model=model,
@@ -446,7 +434,8 @@ if __name__ == "__main__":
         max_grad_norm=1,
     )
     writer.close()
-    """
+    
+    '''
 
     test_data_loader = data.DataLoader(
         dataset=dataset.get_test_set(),
@@ -457,10 +446,10 @@ if __name__ == "__main__":
     mu, sigma = dataset.get_scaler_params()
 
     all_predictions = generate_predictions_with_labels(
-        model_name="model_20231207_084237_1500",
+        model_name="model_20231207_170505_323",
         test_set=dataset.get_test_set(),
         price_scaler_std=sigma,
         price_scaler_mean=mu,
-        y_enc_features=dataset.get_trim_label_names(),
-        listing_id = dataset.get_test_id()
+        listing_id = dataset.get_test_id(),
+        label_encoder = dataset.get_label_encoder()
     )
