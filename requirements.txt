@@ -6,3 +6,11 @@ statsmodels
 scipy
 torch
 scikit-learn
+seaborn
+tqdm
+jupyter
+ipywidgets
+widgetsnbextension
+tensorboardX
+joblib
+imbalanced-learn
