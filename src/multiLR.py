@@ -125,14 +125,16 @@ class car_data(data.Dataset):
         return self.mean_value, self.std_dev_value
 
     def get_label_encoder(self):
-        label_encoder = joblib.load("./src/label_encoder.joblib")
+        label_encoder = joblib.load("./src/label_encoder_vehicle_trim.joblib")
         return label_encoder
 
 
-class MLT_log_reg(nn.Module):
+class MLT_softmaxReg_linRef(nn.Module):
     def __init__(self, n_input_features, num_trim_classes):
-        super(MLT_log_reg, self).__init__()
-        self.trim_linear = nn.Linear(n_input_features, num_trim_classes)
+        super(MLT_softmaxReg_linRef, self).__init__()
+        self.trim_linear_1 = nn.Linear(n_input_features, n_input_features * 2)
+        self.act = nn.ReLU()
+        self.trim_linear_2 = nn.Linear(n_input_features * 2, num_trim_classes)
         self.price_linear = nn.Linear(n_input_features, 1)
         # Fight off co-adaptation (when multiple neurons in a layer extract the same, or very similar, hidden features from the input data)
         # So p% of nodes in input and hidden layer dropped in every iteration (batch) --> sparsity
@@ -144,14 +146,15 @@ class MLT_log_reg(nn.Module):
         # https://arxiv.org/abs/2004.13379
         self.trim_weight = nn.Parameter(torch.Tensor([1.0]))
         self.price_weight = nn.Parameter(torch.Tensor([1.0]))
-        self.dropout = nn.Dropout(p=0.25)
+        self.dropout = nn.Dropout(p=0.3)
 
     def forward(self, x):
-        x = self.dropout(x)
-        trim_non_logits = self.trim_linear(x)
+        trim_non_norm_logits = self.trim_linear_2(
+            self.dropout(self.act(self.trim_linear_1(x)))
+        )  # cross-entropy function takes in these
+        trim_activations = torch.sigmoid(trim_non_norm_logits)  # probs, [0,1]
         price_vals = self.price_linear(x)
-        # cross entropy loss will normalize the logits across class
-        return torch.sigmoid(trim_non_logits), price_vals
+        return trim_non_norm_logits, price_vals
 
 
 def train_model(
@@ -183,7 +186,9 @@ def train_model(
             for batch_idx, batch in enumerate(train_data_loader):
                 ## Step 1: Move input data to device (only strictly necessary if we use GPU)
                 features = batch["features"].to(device)
-                trim_labels = batch["labels"]["trim_label"].to(device)
+                trim_labels = (
+                    batch["labels"]["trim_label"].to(device, dtype=torch.long).squeeze()
+                )
                 price_labels = batch["labels"]["price_label"].to(device)
 
                 ## Step 2: Run the model on the input data; BCEWithLogitsLoss will apply the
@@ -240,8 +245,7 @@ def train_model(
             print(f"Validation Loss after epoch {epoch + 1}: {val_loss}\n")
             writer.add_scalar("Validation Loss Epoch", val_loss, epoch + 1)
             writer.add_scalars(
-                f"Val_Train_Loss",
-                {"Val_Loss_Epoch": val_loss, "Train_Loss": total_loss},
+                "Loss", {"Val_Loss_Epoch": val_loss, "Train_Loss": total_loss.item()}, global_step=epoch
             )
 
             # Check for early stopping
@@ -271,7 +275,9 @@ def evaluate_model(model, data_loader, price_loss, trim_loss):
     with torch.no_grad():
         for batch_idx, batch in enumerate(data_loader):
             features = batch["features"].to(device)
-            trim_labels = batch["labels"]["trim_label"].to(device)
+            trim_labels = (
+                batch["labels"]["trim_label"].to(device, dtype=torch.long).squeeze()
+            )
             price_labels = batch["labels"]["price_label"].to(device)
 
             # Forward pass
@@ -315,20 +321,15 @@ def generate_predictions_with_labels(
     model.eval()
 
     features = test_set.to(device)
-    trim_names = label_encoder["preprocessor"].get_feature_names_out()
+    trim_names = label_encoder.classes_
 
     with torch.no_grad():
         # Forward pass
         pred_trim_logits, pred_price_scaled_vals = model(features)
 
-        inverter = (
-            label_encoder.named_steps["preprocessor"]
-            .named_transformers_["cat"]
-            .named_steps["onehot"]
-            .inverse_transform
-        )
+        inverter = label_encoder.inverse_transform
 
-        label_trim_names = inverter(pred_trim_logits.cpu().numpy())
+        label_trim_names = inverter(torch.argmax(torch.softmax(pred_trim_logits, dim=1), dim=1).cpu().numpy())
         pred_price_scaled_vals = pred_price_scaled_vals.cpu().numpy()
 
         # Reverse the standard scaling for the price labels
@@ -369,7 +370,7 @@ if __name__ == "__main__":
     train_dataset, val_dataset = data.random_split(dataset, [train_size, val_size])
 
     batch_size = 64
-    learning_rate = 0.02  # used .008
+    learning_rate = 0.03  
     weight_decay = 0.001  # l2 regularization
     momentum = 0
 
@@ -390,7 +391,7 @@ if __name__ == "__main__":
     # For iterating over the whole dataset, we can simple use "for batch in train_data_loader: ..."
     sample = next(iter(train_data_loader))
     n_input_features = sample["features"].shape[1]
-    num_trim_classes = sample["labels"]["trim_label"].shape[1]
+    num_trim_classes = len(dataset.get_label_encoder().classes_)
     print(f"Keys in our sample batch: {sample.keys()}")
     print(f"Size for the features in our sample batch: {sample['features'].shape}")
     print(
@@ -406,15 +407,18 @@ if __name__ == "__main__":
         f"Targets for each price batch in our sample: {sample['labels']['price_label']}"
     )
 
-    model = MLT_log_reg(n_input_features, num_trim_classes=num_trim_classes)
+    model = MLT_softmaxReg_linRef(n_input_features, num_trim_classes=num_trim_classes)
     model.to(device)
 
     # NOTE reduction by mean default means loss will be normalized by batch size
     # to get a loss per epoch can set to sum or mult by batch size and then divide by
     # entire dataset size
-    # CrossEntropyLoss combines nn.LogSoftmax() in model followed by nn.NLLLoss() criterion in one single go assuming input is logits (softmax'd)
+    # NOTE CrossEntropyLoss combines nn.LogSoftmax() in model followed by nn.NLLLoss() criterion in one single go assuming input is logits (softmax'd)
     # The softmax function returns probabilities between [0, 1] where sum *across classes* sum to 1; log of these probabilities
     # returns values between [-inf, 0], since log(0) = -inf and log(1) = 0
+    # NOTE torch.nn.CrossEntropyLoss() gets input as raw logits (not normalized probs as it will logsoftmax+NLLoss internally)
+    # in the shape [batch_size, nb_classes] and target in the shape [batch_size]
+    ## NOTE torch.nn.CrossEntropyLoss() needs targets to be in slass indices in the range [0,C) where CC is the number of classes or class probs
     trim_criterion = nn.CrossEntropyLoss()  # need input in logits
     price_criterion = (
         nn.HuberLoss()
@@ -428,7 +432,6 @@ if __name__ == "__main__":
     )
     print("The parameters: ", list(model.parameters()))
     '''
-    
     writer = SummaryWriter()
     train_model(
         model=model,
@@ -453,7 +456,7 @@ if __name__ == "__main__":
     mu, sigma = dataset.get_scaler_params()
 
     all_predictions = generate_predictions_with_labels(
-        model_name="model_20231207_202815_117",
+        model_name="model_20231209_225024_687",
         test_set=dataset.get_test_set(),
         price_scaler_std=sigma,
         price_scaler_mean=mu,
